@@ -763,6 +763,28 @@ func randPath(l int, d int, chars string) string {
 	return pathEscape(string(b))
 }
 
+// sanitizeDomainName converts a URL to a safe filename
+func sanitizeDomainName(url string) string {
+	// Convert to lowercase
+	name := strings.ToLower(url)
+
+	// Remove protocol
+	name = strings.TrimPrefix(name, "https://")
+	name = strings.TrimPrefix(name, "http://")
+
+	// Remove trailing slash
+	name = strings.TrimSuffix(name, "/")
+
+	// Replace dots with underscores
+	name = strings.Replace(name, ".", "_", -1)
+
+	// Replace other special characters with underscores
+	name = strings.Replace(name, ":", "_", -1)
+	name = strings.Replace(name, "/", "_", -1)
+
+	return name
+}
+
 // printHuman prints human readable output if enabled
 func printHuman(s ...any) {
 	if args.Output == "human" {
