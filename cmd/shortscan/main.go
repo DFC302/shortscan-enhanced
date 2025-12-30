@@ -8,7 +8,7 @@
 package main
 
 import (
-	"github.com/bitquark/shortscan/pkg/shortscan"
+	"github.com/DFC302/shortscan-enhanced/pkg/shortscan"
 )
 
 func main() {

@@ -2,7 +2,7 @@
 // Shortscan
 // An IIS short filename enumeration tool by bitquark
 // ------------------------------------------------------
-// Docs and code: https://github.com/bitquark/shortscan
+// Docs and code: https://github.com/DFC302/shortscan-enhanced
 // ------------------------------------------------------
 
 package shortscan
@@ -25,9 +25,9 @@ import (
 	"net/http/httputil"
 	"github.com/fatih/color"
 	"github.com/alexflint/go-arg"
-	"github.com/bitquark/shortscan/pkg/maths"
-	"github.com/bitquark/shortscan/pkg/shortutil"
-	"github.com/bitquark/shortscan/pkg/levenshtein"
+	"github.com/DFC302/shortscan-enhanced/pkg/maths"
+	"github.com/DFC302/shortscan-enhanced/pkg/shortutil"
+	"github.com/DFC302/shortscan-enhanced/pkg/levenshtein"
 	log "github.com/sirupsen/logrus"
 	nurl "net/url"
 )

@@ -1,4 +1,4 @@
-module github.com/bitquark/shortscan
+module github.com/DFC302/shortscan-enhanced
 
 go 1.18
 

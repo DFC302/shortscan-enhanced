@@ -2,7 +2,7 @@
 // Shortutil
 // A short filename utility written by bitquark
 // ----------------------------------------------------
-// Docs and code: https://github.com/bitquark/shortscan
+// Docs and code: https://github.com/DFC302/shortscan-enhanced
 // ----------------------------------------------------
 
 package shortutil
@@ -20,7 +20,7 @@ import (
 	"net/url"
 	"github.com/fatih/color"
 	"github.com/alexflint/go-arg"
-	"github.com/bitquark/shortscan/pkg/maths"
+	"github.com/DFC302/shortscan-enhanced/pkg/maths"
 )
 
 type wordlistRecord struct {
