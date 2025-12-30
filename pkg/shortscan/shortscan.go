@@ -306,7 +306,7 @@ func fetch(hc *http.Client, st *httpStats, method string, url string) (*http.Res
 }
 
 // enumerate builds and fetches candidate short name URLs making use of recursion
-func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpStats, ac *attackConfig, mk markers, br baseRequest) {
+func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpStats, ac *attackConfig, mk markers, br baseRequest, outputBuf *outputBuffer) {
 
 	// Extension enumeration mode
 	extMode := len(br.ext) > 0
@@ -539,7 +539,7 @@ func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpS
 								}
 								fp = strings.Replace(fn+fe, "?", color.HiBlackString("?"), -1)
 							}
-							printHuman(fmt.Sprintf("%-20s %-28s %s", br.file+br.tilde+br.ext, fp, ff))
+							printHumanWithBuffer(outputBuf, fmt.Sprintf("%-20s %-28s %s", br.file+br.tilde+br.ext, fp, ff))
 
 						} else {
 
@@ -554,7 +554,7 @@ func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpS
 								Partname:  fn + fe,
 								Fullname:  fnr,
 							}
-							printJSON(o)
+							printJSONWithBuffer(outputBuf, o)
 
 						}
 
@@ -570,7 +570,7 @@ func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpS
 					if len(br.ext) == 0 {
 						nr := br
 						nr.ext = "."
-						enumerate(sem, wg, hc, st, ac, mk, nr)
+						enumerate(sem, wg, hc, st, ac, mk, nr, outputBuf)
 					}
 
 				}
@@ -589,7 +589,7 @@ func enumerate(sem chan struct{}, wg *sync.WaitGroup, hc *http.Client, st *httpS
 					// Recurse if there are more characters in the name
 					res, err = fetch(hc, st, ac.method, url)
 					if err == nil && res.StatusCode != mk.statusNeg {
-						enumerate(sem, wg, hc, st, ac, mk, br)
+						enumerate(sem, wg, hc, st, ac, mk, br, outputBuf)
 					}
 
 				}
@@ -1187,7 +1187,7 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 
 			// Loop through the tilde pool
 			for _, tilde := range ac.tildes {
-				enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""})
+				enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""}, outputBuf)
 			}
 			wg.Wait()
 
