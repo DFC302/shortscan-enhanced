@@ -891,27 +891,37 @@ func logVulnerable(saveDir, url string, lineCount int) error {
 
 // printHuman prints human readable output if enabled
 func printHuman(s ...any) {
+	printHumanWithBuffer(nil, s...)
+}
+
+// printHumanWithBuffer prints human readable output if enabled, using the provided buffer
+func printHumanWithBuffer(buf *outputBuffer, s ...any) {
 	if args.Output == "human" {
 		output := fmt.Sprintln(s...)
 		fmt.Print(output)
 
-		// Also write to buffer if save-dir specified
-		if globalOutputBuf != nil {
-			globalOutputBuf.Write([]byte(output))
+		// Also write to buffer if provided
+		if buf != nil {
+			buf.Write([]byte(output))
 		}
 	}
 }
 
 // printJSON prints JSON formatted output if enabled
 func printJSON(o any) {
+	printJSONWithBuffer(nil, o)
+}
+
+// printJSONWithBuffer prints JSON formatted output if enabled, using the provided buffer
+func printJSONWithBuffer(buf *outputBuffer, o any) {
 	if args.Output == "json" {
 		j, _ := json.Marshal(o)
 		output := string(j) + "\n"
 		fmt.Print(output)
 
-		// Also write to buffer if save-dir specified
-		if globalOutputBuf != nil {
-			globalOutputBuf.Write([]byte(output))
+		// Also write to buffer if provided
+		if buf != nil {
+			buf.Write([]byte(output))
 		}
 	}
 }
@@ -934,9 +944,12 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		domainCtx, cancel := context.WithTimeout(ctx, scanTimeout)
 
 		// Initialize output buffer for this domain if save-dir specified
+		var localOutputBuf *outputBuffer
 		if args.SaveDir != "" {
-			globalOutputBuf = &outputBuffer{}
+			localOutputBuf = &outputBuffer{}
+			globalOutputBuf = localOutputBuf
 		} else {
+			localOutputBuf = nil
 			globalOutputBuf = nil
 		}
 
@@ -947,7 +960,7 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		timedOut := false
 
 		// Run scan in goroutine
-		go func() {
+		go func(outputBuf *outputBuffer) {
 			defer close(done)
 
 			// Default to HTTPS if no protocol was supplied
@@ -961,18 +974,20 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 
 			// Validate the URL
 			if _, err := nurl.Parse(url); err != nil {
-				log.WithFields(log.Fields{"url": url, "error": err}).Fatal("Unable to parse URL")
+				log.WithFields(log.Fields{"url": url, "error": err}).Error("Unable to parse URL")
+				return
 			}
 
 			// Grab some headers and make sure the URL is accessible
 			res, err := fetch(hc, st, "GET", url+".aspx")
 			if err != nil {
-				log.WithFields(log.Fields{"error": err}).Fatal("Unable to access server")
+				log.WithFields(log.Fields{"error": err}).Error("Unable to access server")
+				return
 			}
 
 			// Display server information
-			printHuman("\n════════════════════════════════════════════════════════════════════════════════")
-			printHuman(color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
+			printHumanWithBuffer(outputBuf, "\n════════════════════════════════════════════════════════════════════════════════")
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
 			srv := "<unknown>"
 			if len(res.Header["Server"]) > 0 {
 				srv = strings.Join(res.Header["Server"], ", ")
@@ -983,7 +998,7 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			if args.Output == "human" && srv != "<unknown>" && !strings.Contains(srv, "IIS") && !strings.Contains(srv, "ASP") {
 				srv += " " + color.HiRedString("[!]")
 			}
-			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
 
 			// If autocomplete is in autoselect mode
 			if args.Autocomplete == "auto" {
@@ -1105,18 +1120,18 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			}
 
 			// Output JSON status if requested
-			printJSON(statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
+			printJSONWithBuffer(outputBuf, statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
 
 			// Skip this URL if no tilde files could be identified :'(
 			if len(ac.tildes) == 0 {
-				printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
-				printHuman("════════════════════════════════════════════════════════════════════════════════")
+				printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
+				printHumanWithBuffer(outputBuf, "════════════════════════════════════════════════════════════════════════════════")
 				return
 			}
 
 			// We are GO for second stage
-			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
-			printHuman("════════════════════════════════════════════════════════════════════════════════")
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
+			printHumanWithBuffer(outputBuf, "════════════════════════════════════════════════════════════════════════════════")
 			log.WithFields(log.Fields{"method": ac.method, "suffix": ac.suffix, "statusPos": mk.statusPos, "statusNeg": mk.statusNeg}).Info("Found working options")
 			log.WithFields(log.Fields{"tildes": ac.tildes}).Info("Found tilde files")
 
@@ -1180,7 +1195,7 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
 				newUrls = append([]string{url + ac.foundDirectories[i] + "/"}, newUrls...)
 			}
-		}()
+		}(localOutputBuf)
 
 		// Wait for completion or timeout
 		select {
