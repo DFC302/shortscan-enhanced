@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"bufio"
+	"bytes"
 	"embed"
 	"regexp"
 	"strings"
@@ -106,6 +107,49 @@ type statsOutput struct {
 	Retries       int    `json:"retries"`
 	SentBytes     int    `json:"sentbytes"`
 	ReceivedBytes int    `json:"receivedbytes"`
+}
+
+// OutputBuffer captures output for conditional saving
+type outputBuffer struct {
+	buffer bytes.Buffer
+	mu     sync.Mutex
+}
+
+// Write implements io.Writer interface
+func (ob *outputBuffer) Write(p []byte) (n int, err error) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	return ob.buffer.Write(p)
+}
+
+// String returns the buffered content
+func (ob *outputBuffer) String() string {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	return ob.buffer.String()
+}
+
+// Reset clears the buffer
+func (ob *outputBuffer) Reset() {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.buffer.Reset()
+}
+
+// IsVulnerable checks if output contains vulnerability confirmation
+func (ob *outputBuffer) IsVulnerable() bool {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	content := ob.buffer.String()
+	// Check for human format "Vulnerable: Yes"
+	if strings.Contains(content, "Vulnerable: Yes") {
+		return true
+	}
+	// Check for JSON format "vulnerable":true
+	if strings.Contains(content, `"vulnerable":true`) {
+		return true
+	}
+	return false
 }
 
 // Version, rainbow table magic, default character set
