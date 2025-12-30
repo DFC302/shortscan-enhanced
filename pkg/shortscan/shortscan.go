@@ -927,6 +927,12 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		url, urls = urls[0], urls[1:]
 		url = strings.TrimSuffix(url, "/") + "/"
 
+		// Parse scan timeout
+		scanTimeout, _ := time.ParseDuration(args.ScanTimeout)
+
+		// Create timeout context for this domain
+		domainCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+
 		// Initialize output buffer for this domain if save-dir specified
 		if args.SaveDir != "" {
 			globalOutputBuf = &outputBuffer{}
@@ -934,138 +940,150 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			globalOutputBuf = nil
 		}
 
-		// Default to HTTPS if no protocol was supplied
-		if !strings.Contains(url, "://") {
-			url = "https://" + url
-		}
+		// Channel to signal completion
+		done := make(chan struct{})
+		var ac attackConfig
+		var newUrls []string
+		timedOut := false
 
-		// -----------------------------------------------
-		// Pre-flight: check that the server is accessible
-		// -----------------------------------------------
+		// Run scan in goroutine
+		go func() {
+			defer close(done)
 
-		// Validate the URL
-		if _, err := nurl.Parse(url); err != nil {
-			log.WithFields(log.Fields{"url": url, "error": err}).Fatal("Unable to parse URL")
-		}
-
-		// Grab some headers and make sure the URL is accessible
-		res, err := fetch(hc, st, "GET", url+".aspx")
-		if err != nil {
-			log.WithFields(log.Fields{"error": err}).Fatal("Unable to access server")
-		}
-
-		// Display server information
-		printHuman("\n════════════════════════════════════════════════════════════════════════════════")
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
-		srv := "<unknown>"
-		if len(res.Header["Server"]) > 0 {
-			srv = strings.Join(res.Header["Server"], ", ")
-		}
-		if v, ok := res.Header["X-Aspnet-Version"]; ok {
-			srv += " (ASP.NET v" + v[0] + ")"
-		}
-		if args.Output == "human" && srv != "<unknown>" && !strings.Contains(srv, "IIS") && !strings.Contains(srv, "ASP") {
-			srv += " " + color.HiRedString("[!]")
-		}
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
-
-		// If autocomplete is in autoselect mode
-		if args.Autocomplete == "auto" {
-
-			// Check whether requesting a valid URL with an invalid HTTP method returns a 405 Method Not Allowed,
-			// which autocomplete can use as a reliable method to detecting whether file candidates exist
-			if res, err := fetch(hc, st, "_", url); err == nil && res.StatusCode == 405 {
-				args.Autocomplete = "method"
-				log.Info("Using method-based file existence checks")
-			} else {
-				args.Autocomplete = "status"
-				log.Info("Using status-based file existence checks")
+			// Default to HTTPS if no protocol was supplied
+			if !strings.Contains(url, "://") {
+				url = "https://" + url
 			}
 
-		}
+			// -----------------------------------------------
+			// Pre-flight: check that the server is accessible
+			// -----------------------------------------------
 
-		// ---------------------------------------------------
-		// First stage: check whether the server is vulnerable
-		// ---------------------------------------------------
+			// Validate the URL
+			if _, err := nurl.Parse(url); err != nil {
+				log.WithFields(log.Fields{"url": url, "error": err}).Fatal("Unable to parse URL")
+			}
 
-		// Initialise attack config
-		ac := attackConfig{wordlist: wc}
+			// Grab some headers and make sure the URL is accessible
+			res, err := fetch(hc, st, "GET", url+".aspx")
+			if err != nil {
+				log.WithFields(log.Fields{"error": err}).Fatal("Unable to access server")
+			}
 
-		// Determine how many methods to try
-		var pc, mc int
-		if args.Patience == 1 {
-			pc = len(pathSuffixes)
-			mc = len(httpMethods)
-		} else {
-			pc = 4
-			mc = 9
-		}
+			// Display server information
+			printHuman("\n════════════════════════════════════════════════════════════════════════════════")
+			printHuman(color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
+			srv := "<unknown>"
+			if len(res.Header["Server"]) > 0 {
+				srv = strings.Join(res.Header["Server"], ", ")
+			}
+			if v, ok := res.Header["X-Aspnet-Version"]; ok {
+				srv += " (ASP.NET v" + v[0] + ")"
+			}
+			if args.Output == "human" && srv != "<unknown>" && !strings.Contains(srv, "IIS") && !strings.Contains(srv, "ASP") {
+				srv += " " + color.HiRedString("[!]")
+			}
+			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
 
-		// Loop through path suffixes
-		outerEscape:
-		for _, suffix := range pathSuffixes[:pc] {
+			// If autocomplete is in autoselect mode
+			if args.Autocomplete == "auto" {
 
-			// Loop through each method
-			methodEscape:
-			for _, method := range httpMethods[:mc] {
-
-				// Make some requests for non-existent files
-				var statusNeg int
-				validMarkers := struct{ status bool }{true}
-				for i := 0; i < 4; i++ {
-
-					// Fetch a "bad" URL (tildes >= ~5 will never be created on Windows 2000 upwards)
-					res, err := fetch(hc, st, method, fmt.Sprintf("%s*%d*%s", url, rand.Intn(5)+5, suffix))
-
-					// Skip this method if all requests failed
-					if err != nil {
-						log.Debug("Method " + method + " failed, skipping")
-						continue methodEscape
-					}
-
-					// Response status code
-					status := res.StatusCode
-
-					// Skip this method if the same status code wasn't received for every request
-					if statusNeg != 0 && status != statusNeg {
-						log.WithFields(log.Fields{"status": status, "statusNeg": statusNeg}).Debug("Method " + method + " unstable, skipping")
-						continue methodEscape
-					}
-
-					// Store the negative response status code
-					statusNeg = status
-
+				// Check whether requesting a valid URL with an invalid HTTP method returns a 405 Method Not Allowed,
+				// which autocomplete can use as a reliable method to detecting whether file candidates exist
+				if res, err := fetch(hc, st, "_", url); err == nil && res.StatusCode == 405 {
+					args.Autocomplete = "method"
+					log.Info("Using method-based file existence checks")
+				} else {
+					args.Autocomplete = "status"
+					log.Info("Using status-based file existence checks")
 				}
 
-				// If there's at least one usable marker
-				if validMarkers.status {
+			}
 
-					// Request available 8.3 files
-					for i := 1; i <= 4; i++ {
+			// ---------------------------------------------------
+			// First stage: check whether the server is vulnerable
+			// ---------------------------------------------------
 
-						// Fetch the URL and check whether it looks like a hit
-						res, err := fetch(hc, st, method, fmt.Sprintf("%s*~%d*%s", url, i, suffix))
-						if err == nil {
+			// Initialise attack config
+			ac = attackConfig{wordlist: wc}
 
-							// Hit response status code
-							statusPos := res.StatusCode
+			// Determine how many methods to try
+			var pc, mc int
+			if args.Patience == 1 {
+				pc = len(pathSuffixes)
+				mc = len(httpMethods)
+			} else {
+				pc = 4
+				mc = 9
+			}
 
-							// If this could be a hit
-							if validMarkers.status && statusPos != statusNeg {
+			// Loop through path suffixes
+			outerEscape:
+			for _, suffix := range pathSuffixes[:pc] {
 
-								// Fetch a "bad" URL and check the status doesn't match the status code we just got
-								res, _ := fetch(hc, st, method, fmt.Sprintf("%s*~0*%s", url, suffix))
-								if statusPos == res.StatusCode {
+				// Loop through each method
+				methodEscape:
+				for _, method := range httpMethods[:mc] {
 
-									// Could be rate limiting (...or we could have killed the server)
-									log.WithFields(log.Fields{"statusPos": statusPos, "statusNeg": statusNeg}).Debug("Negative response differed, could be rate limiting or server instability")
+					// Make some requests for non-existent files
+					var statusNeg int
+					validMarkers := struct{ status bool }{true}
+					for i := 0; i < 4; i++ {
 
-								} else {
+						// Fetch a "bad" URL (tildes >= ~5 will never be created on Windows 2000 upwards)
+						res, err := fetch(hc, st, method, fmt.Sprintf("%s*%d*%s", url, rand.Intn(5)+5, suffix))
 
-									// Update tilde list and status marker
-									ac.tildes = append(ac.tildes, fmt.Sprintf("~%d", i))
-									mk.statusPos = statusPos
-									mk.statusNeg = statusNeg
+						// Skip this method if all requests failed
+						if err != nil {
+							log.Debug("Method " + method + " failed, skipping")
+							continue methodEscape
+						}
+
+						// Response status code
+						status := res.StatusCode
+
+						// Skip this method if the same status code wasn't received for every request
+						if statusNeg != 0 && status != statusNeg {
+							log.WithFields(log.Fields{"status": status, "statusNeg": statusNeg}).Debug("Method " + method + " unstable, skipping")
+							continue methodEscape
+						}
+
+						// Store the negative response status code
+						statusNeg = status
+
+					}
+
+					// If there's at least one usable marker
+					if validMarkers.status {
+
+						// Request available 8.3 files
+						for i := 1; i <= 4; i++ {
+
+							// Fetch the URL and check whether it looks like a hit
+							res, err := fetch(hc, st, method, fmt.Sprintf("%s*~%d*%s", url, i, suffix))
+							if err == nil {
+
+								// Hit response status code
+								statusPos := res.StatusCode
+
+								// If this could be a hit
+								if validMarkers.status && statusPos != statusNeg {
+
+									// Fetch a "bad" URL and check the status doesn't match the status code we just got
+									res, _ := fetch(hc, st, method, fmt.Sprintf("%s*~0*%s", url, suffix))
+									if statusPos == res.StatusCode {
+
+										// Could be rate limiting (...or we could have killed the server)
+										log.WithFields(log.Fields{"statusPos": statusPos, "statusNeg": statusNeg}).Debug("Negative response differed, could be rate limiting or server instability")
+
+									} else {
+
+										// Update tilde list and status marker
+										ac.tildes = append(ac.tildes, fmt.Sprintf("~%d", i))
+										mk.statusPos = statusPos
+										mk.statusNeg = statusNeg
+
+									}
 
 								}
 
@@ -1073,96 +1091,113 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 
 						}
 
-					}
+						// If 8.3 files were found
+						if len(ac.tildes) > 0 {
+							ac.method = method
+							ac.suffix = suffix
+							break outerEscape
+						}
 
-					// If 8.3 files were found
-					if len(ac.tildes) > 0 {
-						ac.method = method
-						ac.suffix = suffix
-						break outerEscape
 					}
 
 				}
 
 			}
 
-		}
+			// Output JSON status if requested
+			printJSON(statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
 
-		// Output JSON status if requested
-		printJSON(statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
+			// Skip this URL if no tilde files could be identified :'(
+			if len(ac.tildes) == 0 {
+				printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
+				printHuman("════════════════════════════════════════════════════════════════════════════════")
+				return
+			}
 
-		// Skip this URL if no tilde files could be identified :'(
-		if len(ac.tildes) == 0 {
-			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
+			// We are GO for second stage
+			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
 			printHuman("════════════════════════════════════════════════════════════════════════════════")
-			continue
-		}
+			log.WithFields(log.Fields{"method": ac.method, "suffix": ac.suffix, "statusPos": mk.statusPos, "statusNeg": mk.statusNeg}).Info("Found working options")
+			log.WithFields(log.Fields{"tildes": ac.tildes}).Info("Found tilde files")
 
-		// We are GO for second stage
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
-		printHuman("════════════════════════════════════════════════════════════════════════════════")
-		log.WithFields(log.Fields{"method": ac.method, "suffix": ac.suffix, "statusPos": mk.statusPos, "statusNeg": mk.statusNeg}).Info("Found working options")
-		log.WithFields(log.Fields{"tildes": ac.tildes}).Info("Found tilde files")
+			// Bail here if we're just running a vuln check
+			if args.IsVuln {
+				return
+			}
 
-		// Bail here if we're just running a vuln check
-		if args.IsVuln {
-			continue
-		}
+			// --------------------------------------------------
+			// Second stage: find out which characters are in use
+			// --------------------------------------------------
 
-		// --------------------------------------------------
-		// Second stage: find out which characters are in use
-		// --------------------------------------------------
+			// Loop twice, first to check file characters, then to check extension characters
+			ac.fileChars, ac.extChars = make(map[string]string), make(map[string]string)
+			for i := 0; i < 2; i++ {
 
-		// Loop twice, first to check file characters, then to check extension characters
-		ac.fileChars, ac.extChars = make(map[string]string), make(map[string]string)
-		for i := 0; i < 2; i++ {
+				// Loop through characters and tilde levels
+				for _, char := range args.Characters {
+					for _, tilde := range ac.tildes {
 
-			// Loop through characters and tilde levels
-			for _, char := range args.Characters {
-				for _, tilde := range ac.tildes {
+						// Set the check URL and character map
+						var cu string
+						var cm map[string]string
+						if i == 0 {
+							cm = ac.fileChars
+							cu = url + "*" + pathEscape(string(char)) + "*" + tilde + "*" + ac.suffix
+						} else {
+							cm = ac.extChars
+							cu = url + "*" + tilde + "*" + pathEscape(string(char)) + "*" + ac.suffix
+						}
 
-					// Set the check URL and character map
-					var cu string
-					var cm map[string]string
-					if i == 0 {
-						cm = ac.fileChars
-						cu = url + "*" + pathEscape(string(char)) + "*" + tilde + "*" + ac.suffix
-					} else {
-						cm = ac.extChars
-						cu = url + "*" + tilde + "*" + pathEscape(string(char)) + "*" + ac.suffix
+						// Add hits to the character map
+						res, err := fetch(hc, st, ac.method, cu)
+						if err == nil && res.StatusCode != mk.statusNeg {
+							cm[tilde] = cm[tilde] + string(char)
+						}
+
 					}
-
-					// Add hits to the character map
-					res, err := fetch(hc, st, ac.method, cu)
-					if err == nil && res.StatusCode != mk.statusNeg {
-						cm[tilde] = cm[tilde] + string(char)
-					}
-
 				}
 			}
+
+			// Status
+			log.WithFields(log.Fields{"fileChars": ac.fileChars, "extChars": ac.extChars}).Info("Built character set")
+
+			// --------------------------------------
+			// Third stage: enumerate all the things!
+			// --------------------------------------
+
+			// Initialise things
+			ac.foundFiles = make(map[string]struct{})
+			sem := make(chan struct{}, args.Concurrency)
+			wg := new(sync.WaitGroup)
+
+			// Loop through the tilde pool
+			for _, tilde := range ac.tildes {
+				enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""})
+			}
+			wg.Wait()
+
+			// Store discovered directories for processing outside goroutine
+			for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
+				newUrls = append([]string{url + ac.foundDirectories[i] + "/"}, newUrls...)
+			}
+		}()
+
+		// Wait for completion or timeout
+		select {
+		case <-done:
+			// Scan completed normally
+		case <-domainCtx.Done():
+			// Timeout occurred
+			timedOut = true
+			log.WithFields(log.Fields{"url": url, "timeout": args.ScanTimeout}).Warn("Domain scan timed out")
+			printHuman(color.New(color.FgYellow).Sprint("⚠ Scan timed out after", args.ScanTimeout))
 		}
 
-		// Status
-		log.WithFields(log.Fields{"fileChars": ac.fileChars, "extChars": ac.extChars}).Info("Built character set")
+		cancel()
 
-		// --------------------------------------
-		// Third stage: enumerate all the things!
-		// --------------------------------------
-
-		// Initialise things
-		ac.foundFiles = make(map[string]struct{})
-		sem := make(chan struct{}, args.Concurrency)
-		wg := new(sync.WaitGroup)
-
-		// Loop through the tilde pool
-		for _, tilde := range ac.tildes {
-			enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""})
-		}
-		wg.Wait()
-
-		// Prepend discovered directories for processing next iteration
-		for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
-			urls = append([]string{url + ac.foundDirectories[i] + "/"}, urls...)
+		// Prepend discovered directories to urls list if scan completed
+		if !timedOut && len(newUrls) > 0 {
+			urls = append(newUrls, urls...)
 		}
 
 		// Save results if vulnerable and save-dir specified
