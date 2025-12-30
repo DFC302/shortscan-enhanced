@@ -13,7 +13,9 @@ import (
 	"sync"
 	"time"
 	"bufio"
+	"bytes"
 	"embed"
+	"context"
 	"regexp"
 	"strings"
 	"math/rand"
@@ -108,6 +110,49 @@ type statsOutput struct {
 	ReceivedBytes int    `json:"receivedbytes"`
 }
 
+// OutputBuffer captures output for conditional saving
+type outputBuffer struct {
+	buffer bytes.Buffer
+	mu     sync.Mutex
+}
+
+// Write implements io.Writer interface
+func (ob *outputBuffer) Write(p []byte) (n int, err error) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	return ob.buffer.Write(p)
+}
+
+// String returns the buffered content
+func (ob *outputBuffer) String() string {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	return ob.buffer.String()
+}
+
+// Reset clears the buffer
+func (ob *outputBuffer) Reset() {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.buffer.Reset()
+}
+
+// IsVulnerable checks if output contains vulnerability confirmation
+func (ob *outputBuffer) IsVulnerable() bool {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	content := ob.buffer.String()
+	// Check for human format "Vulnerable: Yes"
+	if strings.Contains(content, "Vulnerable: Yes") {
+		return true
+	}
+	// Check for JSON format "vulnerable":true
+	if strings.Contains(content, `"vulnerable":true`) {
+		return true
+	}
+	return false
+}
+
 // Version, rainbow table magic, default character set
 const version = "0.9.2"
 const rainbowMagic = "#SHORTSCAN#"
@@ -136,9 +181,15 @@ var statusCache map[string]map[int]struct{}
 var distanceCache map[string]map[int]distances
 var checksumRegex *regexp.Regexp
 
+// Mutex for log file writes
+var logMutex sync.Mutex
+
+// Global output buffer for capturing scan output when save-dir is specified
+var globalOutputBuf *outputBuffer
+
 // Command-line arguments and help
 type arguments struct {
-	Urls         []string `arg:"positional,required" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
+	Urls         []string `arg:"positional" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
 	Wordlist     string   `arg:"-w" help:"combined wordlist + rainbow table generated with shortutil" placeholder:"FILE"`
 	Headers      []string `arg:"--header,-H,separate" help:"header to send with each request (use multiple times for multiple headers)"`
 	Concurrency  int      `arg:"-c" help:"number of requests to make at once" default:"20"`
@@ -152,6 +203,8 @@ type arguments struct {
 	Characters   string   `arg:"-C" help:"filename characters to enumerate" default:"JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320-_()&'!#$%@^{}~"`
 	Autocomplete string   `arg:"-a" help:"autocomplete detection mode (auto = autoselect; method = HTTP method magic; status = HTTP status; distance = Levenshtein distance; none = disable)" placeholder:"mode" default:"auto"`
 	IsVuln       bool     `arg:"-V" help:"bail after determining whether the service is vulnerable" default:"false"`
+	ScanTimeout  string   `arg:"--scan-timeout" help:"maximum time to spend scanning each domain (e.g., 10m, 600s, 1h)" placeholder:"DURATION" default:"10m"`
+	SaveDir      string   `arg:"--save-dir" help:"directory to save results for vulnerable domains (organizes into subdirectories by first letter)" placeholder:"DIR"`
 }
 
 func (arguments) Version() string {
@@ -761,23 +814,120 @@ func randPath(l int, d int, chars string) string {
 	return pathEscape(string(b))
 }
 
+// sanitizeDomainName converts a URL to a safe filename
+func sanitizeDomainName(url string) string {
+	// Convert to lowercase
+	name := strings.ToLower(url)
+
+	// Remove protocol
+	name = strings.TrimPrefix(name, "https://")
+	name = strings.TrimPrefix(name, "http://")
+
+	// Remove trailing slash
+	name = strings.TrimSuffix(name, "/")
+
+	// Replace dots with underscores
+	name = strings.Replace(name, ".", "_", -1)
+
+	// Replace other special characters with underscores
+	name = strings.Replace(name, ":", "_", -1)
+	name = strings.Replace(name, "/", "_", -1)
+
+	return name
+}
+
+// saveResult saves scan output to a file organized by first letter
+func saveResult(saveDir, url, output string) error {
+	// Sanitize domain name
+	filename := sanitizeDomainName(url)
+
+	// Get first character for directory organization
+	firstChar := "other"
+	if len(filename) > 0 {
+		firstChar = string(filename[0])
+	}
+
+	// Create subdirectory path
+	subdir := fmt.Sprintf("%s/%s", saveDir, firstChar)
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", subdir, err)
+	}
+
+	// Create file path
+	filepath := fmt.Sprintf("%s/%s.ss", subdir, filename)
+
+	// Write output to file
+	if err := os.WriteFile(filepath, []byte(output), 0644); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filepath, err)
+	}
+
+	log.WithFields(log.Fields{"file": filepath}).Debug("Saved vulnerable domain result")
+	return nil
+}
+
+// logVulnerable appends vulnerable domain info to log file
+func logVulnerable(saveDir, url string, lineCount int) error {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	logPath := fmt.Sprintf("%s/iis.log", saveDir)
+
+	// Open file in append mode (create if doesn't exist)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer f.Close()
+
+	// Write log entry
+	entry := fmt.Sprintf("%s\t\t%d\n", url, lineCount)
+	if _, err := f.WriteString(entry); err != nil {
+		return fmt.Errorf("failed to write to log file: %w", err)
+	}
+
+	log.WithFields(log.Fields{"url": url, "lines": lineCount}).Debug("Logged vulnerable domain")
+	return nil
+}
+
 // printHuman prints human readable output if enabled
 func printHuman(s ...any) {
+	printHumanWithBuffer(nil, s...)
+}
+
+// printHumanWithBuffer prints human readable output if enabled, using the provided buffer
+func printHumanWithBuffer(buf *outputBuffer, s ...any) {
 	if args.Output == "human" {
-		fmt.Println(s...)
+		output := fmt.Sprintln(s...)
+		fmt.Print(output)
+
+		// Also write to buffer if provided
+		if buf != nil {
+			buf.Write([]byte(output))
+		}
 	}
 }
 
 // printJSON prints JSON formatted output if enabled
 func printJSON(o any) {
+	printJSONWithBuffer(nil, o)
+}
+
+// printJSONWithBuffer prints JSON formatted output if enabled, using the provided buffer
+func printJSONWithBuffer(buf *outputBuffer, o any) {
 	if args.Output == "json" {
 		j, _ := json.Marshal(o)
-		fmt.Println(string(j))
+		output := string(j) + "\n"
+		fmt.Print(output)
+
+		// Also write to buffer if provided
+		if buf != nil {
+			buf.Write([]byte(output))
+		}
 	}
 }
 
 // Scan starts enumeration of the given URL
-func Scan(urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk markers) {
+func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk markers) {
 
 	// Loop through each URL
 	for len(urls) > 0 {
@@ -787,138 +937,168 @@ func Scan(urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk m
 		url, urls = urls[0], urls[1:]
 		url = strings.TrimSuffix(url, "/") + "/"
 
-		// Default to HTTPS if no protocol was supplied
-		if !strings.Contains(url, "://") {
-			url = "https://" + url
+		// Parse scan timeout
+		scanTimeout, _ := time.ParseDuration(args.ScanTimeout)
+
+		// Create timeout context for this domain
+		domainCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+
+		// Initialize output buffer for this domain if save-dir specified
+		var localOutputBuf *outputBuffer
+		if args.SaveDir != "" {
+			localOutputBuf = &outputBuffer{}
+			globalOutputBuf = localOutputBuf
+		} else {
+			localOutputBuf = nil
+			globalOutputBuf = nil
 		}
 
-		// -----------------------------------------------
-		// Pre-flight: check that the server is accessible
-		// -----------------------------------------------
+		// Channel to signal completion
+		done := make(chan struct{})
+		var ac attackConfig
+		var newUrls []string
+		timedOut := false
 
-		// Validate the URL
-		if _, err := nurl.Parse(url); err != nil {
-			log.WithFields(log.Fields{"url": url, "error": err}).Fatal("Unable to parse URL")
-		}
+		// Run scan in goroutine
+		go func(outputBuf *outputBuffer) {
+			defer close(done)
 
-		// Grab some headers and make sure the URL is accessible
-		res, err := fetch(hc, st, "GET", url+".aspx")
-		if err != nil {
-			log.WithFields(log.Fields{"error": err}).Fatal("Unable to access server")
-		}
-
-		// Display server information
-		printHuman("\n════════════════════════════════════════════════════════════════════════════════")
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
-		srv := "<unknown>"
-		if len(res.Header["Server"]) > 0 {
-			srv = strings.Join(res.Header["Server"], ", ")
-		}
-		if v, ok := res.Header["X-Aspnet-Version"]; ok {
-			srv += " (ASP.NET v" + v[0] + ")"
-		}
-		if args.Output == "human" && srv != "<unknown>" && !strings.Contains(srv, "IIS") && !strings.Contains(srv, "ASP") {
-			srv += " " + color.HiRedString("[!]")
-		}
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
-
-		// If autocomplete is in autoselect mode
-		if args.Autocomplete == "auto" {
-
-			// Check whether requesting a valid URL with an invalid HTTP method returns a 405 Method Not Allowed,
-			// which autocomplete can use as a reliable method to detecting whether file candidates exist
-			if res, err := fetch(hc, st, "_", url); err == nil && res.StatusCode == 405 {
-				args.Autocomplete = "method"
-				log.Info("Using method-based file existence checks")
-			} else {
-				args.Autocomplete = "status"
-				log.Info("Using status-based file existence checks")
+			// Default to HTTPS if no protocol was supplied
+			if !strings.Contains(url, "://") {
+				url = "https://" + url
 			}
 
-		}
+			// -----------------------------------------------
+			// Pre-flight: check that the server is accessible
+			// -----------------------------------------------
 
-		// ---------------------------------------------------
-		// First stage: check whether the server is vulnerable
-		// ---------------------------------------------------
+			// Validate the URL
+			if _, err := nurl.Parse(url); err != nil {
+				log.WithFields(log.Fields{"url": url, "error": err}).Error("Unable to parse URL")
+				return
+			}
 
-		// Initialise attack config
-		ac := attackConfig{wordlist: wc}
+			// Grab some headers and make sure the URL is accessible
+			res, err := fetch(hc, st, "GET", url+".aspx")
+			if err != nil {
+				log.WithFields(log.Fields{"error": err}).Error("Unable to access server")
+				return
+			}
 
-		// Determine how many methods to try
-		var pc, mc int
-		if args.Patience == 1 {
-			pc = len(pathSuffixes)
-			mc = len(httpMethods)
-		} else {
-			pc = 4
-			mc = 9
-		}
+			// Display server information
+			printHumanWithBuffer(outputBuf, "\n════════════════════════════════════════════════════════════════════════════════")
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("URL")+":", url)
+			srv := "<unknown>"
+			if len(res.Header["Server"]) > 0 {
+				srv = strings.Join(res.Header["Server"], ", ")
+			}
+			if v, ok := res.Header["X-Aspnet-Version"]; ok {
+				srv += " (ASP.NET v" + v[0] + ")"
+			}
+			if args.Output == "human" && srv != "<unknown>" && !strings.Contains(srv, "IIS") && !strings.Contains(srv, "ASP") {
+				srv += " " + color.HiRedString("[!]")
+			}
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Running")+":", srv)
 
-		// Loop through path suffixes
-		outerEscape:
-		for _, suffix := range pathSuffixes[:pc] {
+			// If autocomplete is in autoselect mode
+			if args.Autocomplete == "auto" {
 
-			// Loop through each method
-			methodEscape:
-			for _, method := range httpMethods[:mc] {
-
-				// Make some requests for non-existent files
-				var statusNeg int
-				validMarkers := struct{ status bool }{true}
-				for i := 0; i < 4; i++ {
-
-					// Fetch a "bad" URL (tildes >= ~5 will never be created on Windows 2000 upwards)
-					res, err := fetch(hc, st, method, fmt.Sprintf("%s*%d*%s", url, rand.Intn(5)+5, suffix))
-
-					// Skip this method if all requests failed
-					if err != nil {
-						log.Debug("Method " + method + " failed, skipping")
-						continue methodEscape
-					}
-
-					// Response status code
-					status := res.StatusCode
-
-					// Skip this method if the same status code wasn't received for every request
-					if statusNeg != 0 && status != statusNeg {
-						log.WithFields(log.Fields{"status": status, "statusNeg": statusNeg}).Debug("Method " + method + " unstable, skipping")
-						continue methodEscape
-					}
-
-					// Store the negative response status code
-					statusNeg = status
-
+				// Check whether requesting a valid URL with an invalid HTTP method returns a 405 Method Not Allowed,
+				// which autocomplete can use as a reliable method to detecting whether file candidates exist
+				if res, err := fetch(hc, st, "_", url); err == nil && res.StatusCode == 405 {
+					args.Autocomplete = "method"
+					log.Info("Using method-based file existence checks")
+				} else {
+					args.Autocomplete = "status"
+					log.Info("Using status-based file existence checks")
 				}
 
-				// If there's at least one usable marker
-				if validMarkers.status {
+			}
 
-					// Request available 8.3 files
-					for i := 1; i <= 4; i++ {
+			// ---------------------------------------------------
+			// First stage: check whether the server is vulnerable
+			// ---------------------------------------------------
 
-						// Fetch the URL and check whether it looks like a hit
-						res, err := fetch(hc, st, method, fmt.Sprintf("%s*~%d*%s", url, i, suffix))
-						if err == nil {
+			// Initialise attack config
+			ac = attackConfig{wordlist: wc}
 
-							// Hit response status code
-							statusPos := res.StatusCode
+			// Determine how many methods to try
+			var pc, mc int
+			if args.Patience == 1 {
+				pc = len(pathSuffixes)
+				mc = len(httpMethods)
+			} else {
+				pc = 4
+				mc = 9
+			}
 
-							// If this could be a hit
-							if validMarkers.status && statusPos != statusNeg {
+			// Loop through path suffixes
+			outerEscape:
+			for _, suffix := range pathSuffixes[:pc] {
 
-								// Fetch a "bad" URL and check the status doesn't match the status code we just got
-								res, _ := fetch(hc, st, method, fmt.Sprintf("%s*~0*%s", url, suffix))
-								if statusPos == res.StatusCode {
+				// Loop through each method
+				methodEscape:
+				for _, method := range httpMethods[:mc] {
 
-									// Could be rate limiting (...or we could have killed the server)
-									log.WithFields(log.Fields{"statusPos": statusPos, "statusNeg": statusNeg}).Debug("Negative response differed, could be rate limiting or server instability")
+					// Make some requests for non-existent files
+					var statusNeg int
+					validMarkers := struct{ status bool }{true}
+					for i := 0; i < 4; i++ {
 
-								} else {
+						// Fetch a "bad" URL (tildes >= ~5 will never be created on Windows 2000 upwards)
+						res, err := fetch(hc, st, method, fmt.Sprintf("%s*%d*%s", url, rand.Intn(5)+5, suffix))
 
-									// Update tilde list and status marker
-									ac.tildes = append(ac.tildes, fmt.Sprintf("~%d", i))
-									mk.statusPos = statusPos
-									mk.statusNeg = statusNeg
+						// Skip this method if all requests failed
+						if err != nil {
+							log.Debug("Method " + method + " failed, skipping")
+							continue methodEscape
+						}
+
+						// Response status code
+						status := res.StatusCode
+
+						// Skip this method if the same status code wasn't received for every request
+						if statusNeg != 0 && status != statusNeg {
+							log.WithFields(log.Fields{"status": status, "statusNeg": statusNeg}).Debug("Method " + method + " unstable, skipping")
+							continue methodEscape
+						}
+
+						// Store the negative response status code
+						statusNeg = status
+
+					}
+
+					// If there's at least one usable marker
+					if validMarkers.status {
+
+						// Request available 8.3 files
+						for i := 1; i <= 4; i++ {
+
+							// Fetch the URL and check whether it looks like a hit
+							res, err := fetch(hc, st, method, fmt.Sprintf("%s*~%d*%s", url, i, suffix))
+							if err == nil {
+
+								// Hit response status code
+								statusPos := res.StatusCode
+
+								// If this could be a hit
+								if validMarkers.status && statusPos != statusNeg {
+
+									// Fetch a "bad" URL and check the status doesn't match the status code we just got
+									res, _ := fetch(hc, st, method, fmt.Sprintf("%s*~0*%s", url, suffix))
+									if statusPos == res.StatusCode {
+
+										// Could be rate limiting (...or we could have killed the server)
+										log.WithFields(log.Fields{"statusPos": statusPos, "statusNeg": statusNeg}).Debug("Negative response differed, could be rate limiting or server instability")
+
+									} else {
+
+										// Update tilde list and status marker
+										ac.tildes = append(ac.tildes, fmt.Sprintf("~%d", i))
+										mk.statusPos = statusPos
+										mk.statusNeg = statusNeg
+
+									}
 
 								}
 
@@ -926,97 +1106,131 @@ func Scan(urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk m
 
 						}
 
-					}
+						// If 8.3 files were found
+						if len(ac.tildes) > 0 {
+							ac.method = method
+							ac.suffix = suffix
+							break outerEscape
+						}
 
-					// If 8.3 files were found
-					if len(ac.tildes) > 0 {
-						ac.method = method
-						ac.suffix = suffix
-						break outerEscape
 					}
 
 				}
 
 			}
 
-		}
+			// Output JSON status if requested
+			printJSONWithBuffer(outputBuf, statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
 
-		// Output JSON status if requested
-		printJSON(statusOutput{Type: "status", Url: url, Server: srv, Vulnerable: len(ac.tildes) > 0})
+			// Skip this URL if no tilde files could be identified :'(
+			if len(ac.tildes) == 0 {
+				printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
+				printHumanWithBuffer(outputBuf, "════════════════════════════════════════════════════════════════════════════════")
+				return
+			}
 
-		// Skip this URL if no tilde files could be identified :'(
-		if len(ac.tildes) == 0 {
-			printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiBlueString("No"), "(or no 8.3 files exist)")
-			printHuman("════════════════════════════════════════════════════════════════════════════════")
-			continue
-		}
+			// We are GO for second stage
+			printHumanWithBuffer(outputBuf, color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
+			printHumanWithBuffer(outputBuf, "════════════════════════════════════════════════════════════════════════════════")
+			log.WithFields(log.Fields{"method": ac.method, "suffix": ac.suffix, "statusPos": mk.statusPos, "statusNeg": mk.statusNeg}).Info("Found working options")
+			log.WithFields(log.Fields{"tildes": ac.tildes}).Info("Found tilde files")
 
-		// We are GO for second stage
-		printHuman(color.New(color.FgWhite, color.Bold).Sprint("Vulnerable:"), color.HiRedString("Yes!"))
-		printHuman("════════════════════════════════════════════════════════════════════════════════")
-		log.WithFields(log.Fields{"method": ac.method, "suffix": ac.suffix, "statusPos": mk.statusPos, "statusNeg": mk.statusNeg}).Info("Found working options")
-		log.WithFields(log.Fields{"tildes": ac.tildes}).Info("Found tilde files")
+			// Bail here if we're just running a vuln check
+			if args.IsVuln {
+				return
+			}
 
-		// Bail here if we're just running a vuln check
-		if args.IsVuln {
-			continue
-		}
+			// --------------------------------------------------
+			// Second stage: find out which characters are in use
+			// --------------------------------------------------
 
-		// --------------------------------------------------
-		// Second stage: find out which characters are in use
-		// --------------------------------------------------
+			// Loop twice, first to check file characters, then to check extension characters
+			ac.fileChars, ac.extChars = make(map[string]string), make(map[string]string)
+			for i := 0; i < 2; i++ {
 
-		// Loop twice, first to check file characters, then to check extension characters
-		ac.fileChars, ac.extChars = make(map[string]string), make(map[string]string)
-		for i := 0; i < 2; i++ {
+				// Loop through characters and tilde levels
+				for _, char := range args.Characters {
+					for _, tilde := range ac.tildes {
 
-			// Loop through characters and tilde levels
-			for _, char := range args.Characters {
-				for _, tilde := range ac.tildes {
+						// Set the check URL and character map
+						var cu string
+						var cm map[string]string
+						if i == 0 {
+							cm = ac.fileChars
+							cu = url + "*" + pathEscape(string(char)) + "*" + tilde + "*" + ac.suffix
+						} else {
+							cm = ac.extChars
+							cu = url + "*" + tilde + "*" + pathEscape(string(char)) + "*" + ac.suffix
+						}
 
-					// Set the check URL and character map
-					var cu string
-					var cm map[string]string
-					if i == 0 {
-						cm = ac.fileChars
-						cu = url + "*" + pathEscape(string(char)) + "*" + tilde + "*" + ac.suffix
-					} else {
-						cm = ac.extChars
-						cu = url + "*" + tilde + "*" + pathEscape(string(char)) + "*" + ac.suffix
+						// Add hits to the character map
+						res, err := fetch(hc, st, ac.method, cu)
+						if err == nil && res.StatusCode != mk.statusNeg {
+							cm[tilde] = cm[tilde] + string(char)
+						}
+
 					}
-
-					// Add hits to the character map
-					res, err := fetch(hc, st, ac.method, cu)
-					if err == nil && res.StatusCode != mk.statusNeg {
-						cm[tilde] = cm[tilde] + string(char)
-					}
-
 				}
+			}
+
+			// Status
+			log.WithFields(log.Fields{"fileChars": ac.fileChars, "extChars": ac.extChars}).Info("Built character set")
+
+			// --------------------------------------
+			// Third stage: enumerate all the things!
+			// --------------------------------------
+
+			// Initialise things
+			ac.foundFiles = make(map[string]struct{})
+			sem := make(chan struct{}, args.Concurrency)
+			wg := new(sync.WaitGroup)
+
+			// Loop through the tilde pool
+			for _, tilde := range ac.tildes {
+				enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""})
+			}
+			wg.Wait()
+
+			// Store discovered directories for processing outside goroutine
+			for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
+				newUrls = append([]string{url + ac.foundDirectories[i] + "/"}, newUrls...)
+			}
+		}(localOutputBuf)
+
+		// Wait for completion or timeout
+		select {
+		case <-done:
+			// Scan completed normally
+		case <-domainCtx.Done():
+			// Timeout occurred
+			timedOut = true
+			log.WithFields(log.Fields{"url": url, "timeout": args.ScanTimeout}).Warn("Domain scan timed out")
+			printHuman(color.New(color.FgYellow).Sprint("⚠ Scan timed out after", args.ScanTimeout))
+		}
+
+		cancel()
+
+		// Prepend discovered directories to urls list if scan completed
+		if !timedOut && len(newUrls) > 0 {
+			urls = append(newUrls, urls...)
+		}
+
+		// Save results if vulnerable and save-dir specified
+		if args.SaveDir != "" && globalOutputBuf != nil && globalOutputBuf.IsVulnerable() {
+			output := globalOutputBuf.String()
+			if err := saveResult(args.SaveDir, url, output); err != nil {
+				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to save result")
+			}
+
+			// Count lines and log
+			lineCount := len(strings.Split(strings.TrimSpace(output), "\n"))
+			if err := logVulnerable(args.SaveDir, url, lineCount); err != nil {
+				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to log vulnerable domain")
 			}
 		}
 
-		// Status
-		log.WithFields(log.Fields{"fileChars": ac.fileChars, "extChars": ac.extChars}).Info("Built character set")
-
-		// --------------------------------------
-		// Third stage: enumerate all the things!
-		// --------------------------------------
-
-		// Initialise things
-		ac.foundFiles = make(map[string]struct{})
-		sem := make(chan struct{}, args.Concurrency)
-		wg := new(sync.WaitGroup)
-
-		// Loop through the tilde pool
-		for _, tilde := range ac.tildes {
-			enumerate(sem, wg, hc, st, &ac, mk, baseRequest{url: url, file: "", tilde: tilde, ext: ""})
-		}
-		wg.Wait()
-
-		// Prepend discovered directories for processing next iteration
-		for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
-			urls = append([]string{url + ac.foundDirectories[i] + "/"}, urls...)
-		}
+		// Clear buffer for next domain
+		globalOutputBuf = nil
 
 		// <hr>
 		printHuman("════════════════════════════════════════════════════════════════════════════════")
@@ -1047,39 +1261,81 @@ func Run() {
 		p.Fail("output must be one of: human, json")
 	}
 
+	// Validate scan timeout
+	if _, err := time.ParseDuration(args.ScanTimeout); err != nil {
+		p.Fail(fmt.Sprintf("invalid scan timeout format: %s (use format like 10m, 600s, 1h)", args.ScanTimeout))
+	}
+
 	// Build the list of URLs to scan
 	var urls []string
-	for _, url := range args.Urls {
 
-		// If this is a filename rather than a URL
-		if strings.HasPrefix(url, "@") {
+	// If no positional URLs provided, check stdin
+	if len(args.Urls) == 0 {
 
-			// Open the file
-			path := strings.TrimPrefix(url, "@")
-			fh, err := os.Open(path)
-			if err != nil {
-				log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Unable to open URL list file")
-			}
-			defer fh.Close()
-
-			// Add each line to the URL list
-			sc := bufio.NewScanner(fh)
-			for sc.Scan() {
-				urls = append(urls, sc.Text())
-			}
-
-			// Check for file read errors
-			if err := sc.Err(); err != nil {
-				log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Error reading URL list file")
-			}
-
-		} else {
-
-			// This is a plain URL, add it to the list
-			urls = append(urls, url)
-
+		// Check if stdin is a pipe or redirect
+		stat, err := os.Stdin.Stat()
+		if err != nil {
+			log.WithFields(log.Fields{"err": err}).Fatal("Unable to check stdin")
 		}
 
+		// If stdin is a pipe or redirect, read from it
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			sc := bufio.NewScanner(os.Stdin)
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text())
+				if line != "" {
+					urls = append(urls, line)
+				}
+			}
+
+			// Check for read errors
+			if err := sc.Err(); err != nil {
+				log.WithFields(log.Fields{"err": err}).Fatal("Error reading from stdin")
+			}
+
+			// Require at least one URL
+			if len(urls) == 0 {
+				log.Fatal("No URLs provided via stdin")
+			}
+		} else {
+			// No URLs provided and stdin is a terminal
+			log.Fatal("No URLs provided (use positional arguments, @file.txt syntax, or pipe to stdin)")
+		}
+
+	} else {
+		// Process positional URL arguments (existing logic)
+		for _, url := range args.Urls {
+
+			// If this is a filename rather than a URL
+			if strings.HasPrefix(url, "@") {
+
+				// Open the file
+				path := strings.TrimPrefix(url, "@")
+				fh, err := os.Open(path)
+				if err != nil {
+					log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Unable to open URL list file")
+				}
+				defer fh.Close()
+
+				// Add each line to the URL list
+				sc := bufio.NewScanner(fh)
+				for sc.Scan() {
+					urls = append(urls, sc.Text())
+				}
+
+				// Check for file read errors
+				if err := sc.Err(); err != nil {
+					log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Error reading URL list file")
+				}
+
+			} else {
+
+				// This is a plain URL, add it to the list
+				urls = append(urls, url)
+
+			}
+
+		}
 	}
 
 	// Say hello
@@ -1195,6 +1451,6 @@ func Run() {
 	}
 
 	// Let's go!
-	Scan(urls, hc, st, wc, mk)
+	Scan(context.Background(), urls, hc, st, wc, mk)
 
 }
