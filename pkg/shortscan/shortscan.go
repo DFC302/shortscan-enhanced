@@ -927,6 +927,13 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		url, urls = urls[0], urls[1:]
 		url = strings.TrimSuffix(url, "/") + "/"
 
+		// Initialize output buffer for this domain if save-dir specified
+		if args.SaveDir != "" {
+			globalOutputBuf = &outputBuffer{}
+		} else {
+			globalOutputBuf = nil
+		}
+
 		// Default to HTTPS if no protocol was supplied
 		if !strings.Contains(url, "://") {
 			url = "https://" + url
@@ -1157,6 +1164,23 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		for i := len(ac.foundDirectories) - 1; i >= 0; i-- {
 			urls = append([]string{url + ac.foundDirectories[i] + "/"}, urls...)
 		}
+
+		// Save results if vulnerable and save-dir specified
+		if args.SaveDir != "" && globalOutputBuf != nil && globalOutputBuf.IsVulnerable() {
+			output := globalOutputBuf.String()
+			if err := saveResult(args.SaveDir, url, output); err != nil {
+				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to save result")
+			}
+
+			// Count lines and log
+			lineCount := len(strings.Split(strings.TrimSpace(output), "\n"))
+			if err := logVulnerable(args.SaveDir, url, lineCount); err != nil {
+				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to log vulnerable domain")
+			}
+		}
+
+		// Clear buffer for next domain
+		globalOutputBuf = nil
 
 		// <hr>
 		printHuman("════════════════════════════════════════════════════════════════════════════════")
