@@ -180,6 +180,9 @@ var statusCache map[string]map[int]struct{}
 var distanceCache map[string]map[int]distances
 var checksumRegex *regexp.Regexp
 
+// Mutex for log file writes
+var logMutex sync.Mutex
+
 // Command-line arguments and help
 type arguments struct {
 	Urls         []string `arg:"positional" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
@@ -827,6 +830,59 @@ func sanitizeDomainName(url string) string {
 	name = strings.Replace(name, "/", "_", -1)
 
 	return name
+}
+
+// saveResult saves scan output to a file organized by first letter
+func saveResult(saveDir, url, output string) error {
+	// Sanitize domain name
+	filename := sanitizeDomainName(url)
+
+	// Get first character for directory organization
+	firstChar := "other"
+	if len(filename) > 0 {
+		firstChar = string(filename[0])
+	}
+
+	// Create subdirectory path
+	subdir := fmt.Sprintf("%s/%s", saveDir, firstChar)
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", subdir, err)
+	}
+
+	// Create file path
+	filepath := fmt.Sprintf("%s/%s.ss", subdir, filename)
+
+	// Write output to file
+	if err := os.WriteFile(filepath, []byte(output), 0644); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filepath, err)
+	}
+
+	log.WithFields(log.Fields{"file": filepath}).Debug("Saved vulnerable domain result")
+	return nil
+}
+
+// logVulnerable appends vulnerable domain info to log file
+func logVulnerable(saveDir, url string, lineCount int) error {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	logPath := fmt.Sprintf("%s/iis.log", saveDir)
+
+	// Open file in append mode (create if doesn't exist)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer f.Close()
+
+	// Write log entry
+	entry := fmt.Sprintf("%s\t\t%d\n", url, lineCount)
+	if _, err := f.WriteString(entry); err != nil {
+		return fmt.Errorf("failed to write to log file: %w", err)
+	}
+
+	log.WithFields(log.Fields{"url": url, "lines": lineCount}).Debug("Logged vulnerable domain")
+	return nil
 }
 
 // printHuman prints human readable output if enabled
