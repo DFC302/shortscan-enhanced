@@ -138,7 +138,7 @@ var checksumRegex *regexp.Regexp
 
 // Command-line arguments and help
 type arguments struct {
-	Urls         []string `arg:"positional,required" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
+	Urls         []string `arg:"positional" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
 	Wordlist     string   `arg:"-w" help:"combined wordlist + rainbow table generated with shortutil" placeholder:"FILE"`
 	Headers      []string `arg:"--header,-H,separate" help:"header to send with each request (use multiple times for multiple headers)"`
 	Concurrency  int      `arg:"-c" help:"number of requests to make at once" default:"20"`
@@ -1051,37 +1051,74 @@ func Run() {
 
 	// Build the list of URLs to scan
 	var urls []string
-	for _, url := range args.Urls {
 
-		// If this is a filename rather than a URL
-		if strings.HasPrefix(url, "@") {
+	// If no positional URLs provided, check stdin
+	if len(args.Urls) == 0 {
 
-			// Open the file
-			path := strings.TrimPrefix(url, "@")
-			fh, err := os.Open(path)
-			if err != nil {
-				log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Unable to open URL list file")
-			}
-			defer fh.Close()
-
-			// Add each line to the URL list
-			sc := bufio.NewScanner(fh)
-			for sc.Scan() {
-				urls = append(urls, sc.Text())
-			}
-
-			// Check for file read errors
-			if err := sc.Err(); err != nil {
-				log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Error reading URL list file")
-			}
-
-		} else {
-
-			// This is a plain URL, add it to the list
-			urls = append(urls, url)
-
+		// Check if stdin is a pipe or redirect
+		stat, err := os.Stdin.Stat()
+		if err != nil {
+			log.WithFields(log.Fields{"err": err}).Fatal("Unable to check stdin")
 		}
 
+		// If stdin is a pipe or redirect, read from it
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			sc := bufio.NewScanner(os.Stdin)
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text())
+				if line != "" {
+					urls = append(urls, line)
+				}
+			}
+
+			// Check for read errors
+			if err := sc.Err(); err != nil {
+				log.WithFields(log.Fields{"err": err}).Fatal("Error reading from stdin")
+			}
+
+			// Require at least one URL
+			if len(urls) == 0 {
+				log.Fatal("No URLs provided via stdin")
+			}
+		} else {
+			// No URLs provided and stdin is a terminal
+			log.Fatal("No URLs provided (use positional arguments, @file.txt syntax, or pipe to stdin)")
+		}
+
+	} else {
+		// Process positional URL arguments (existing logic)
+		for _, url := range args.Urls {
+
+			// If this is a filename rather than a URL
+			if strings.HasPrefix(url, "@") {
+
+				// Open the file
+				path := strings.TrimPrefix(url, "@")
+				fh, err := os.Open(path)
+				if err != nil {
+					log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Unable to open URL list file")
+				}
+				defer fh.Close()
+
+				// Add each line to the URL list
+				sc := bufio.NewScanner(fh)
+				for sc.Scan() {
+					urls = append(urls, sc.Text())
+				}
+
+				// Check for file read errors
+				if err := sc.Err(); err != nil {
+					log.WithFields(log.Fields{"path": path, "err": err}).Fatal("Error reading URL list file")
+				}
+
+			} else {
+
+				// This is a plain URL, add it to the list
+				urls = append(urls, url)
+
+			}
+
+		}
 	}
 
 	// Say hello
