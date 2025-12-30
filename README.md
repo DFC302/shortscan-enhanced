@@ -1,138 +1,224 @@
-# 🌀 Shortscan
+# 🌀 Shortscan Enhanced
 
-An IIS short filename enumeration tool.
+An enhanced version of the IIS short filename enumeration tool with additional features for penetration testing and security assessments.
 
-## Functionality
+**Based on the original [Shortscan](https://github.com/bitquark/shortscan) by bitquark**
 
-Shortscan is designed to quickly determine which files with short filenames exist on an IIS webserver. Once a short filename has been identified the tool will try to automatically identify the full filename.
+## ✨ New Features
 
-In addition to standard discovery methods Shortscan also uses a unique checksum matching approach to attempt to find the long filename where the short filename is based on Windows' propriatary shortname collision avoidance checksum algorithm (more on this research at a later date).
+This enhanced version adds three major features while maintaining 100% backward compatibility:
 
-## Installation
-
-### Quick install
-
-Using a recent version of [go](https://golang.org/):
-
-```
-go install github.com/bitquark/shortscan/cmd/shortscan@latest
+### 1. 📥 Stdin Support
+Pipe domain lists directly into shortscan:
+```bash
+cat targets.txt | shortscan-enhanced -V
 ```
 
-### Manual install
-
-To build (and optionally install) locally:
-
+### 2. ⏱️ Per-Domain Scan Timeout
+Prevent scans from hanging indefinitely on slow servers:
+```bash
+shortscan-enhanced --scan-timeout 5m example.com
 ```
-go get && go build
-go install
-```
+- Default: 10 minutes per domain
+- Supports formats: `30s`, `5m`, `1h`, etc.
+- Independent from per-request timeout (`-t` flag)
 
-## Usage
-
-### Basic usage
-
-Shortscan is easy to use with minimal configuration. Basic usage looks like:
-
-```
-$ shortscan http://example.org/
+### 3. 💾 Automatic File Organization
+Automatically save and organize results for vulnerable domains:
+```bash
+shortscan-enhanced --save-dir ./results example.com
 ```
 
-You can also specify a file containing a list of URLs to be scanned:
-
+**File Structure:**
 ```
-$ shortscan @urls.txt
-```
-
-### Examples
-
-This example sets multiple custom headers by using `--header`/`-H` multiple times:
-```
-shortscan -H 'Host: gibson' -H 'Authorization: Basic ZGFkZTpsMzN0'
+results/
+├── iis.log                    # Summary log
+├── e/
+│   ├── example_com.ss         # Scan results
+│   └── example_org.ss
+└── g/
+    └── google_com.ss
 ```
 
-To check whether a site is vulnerable without performing file enumeration use:
-```
-shortscan --isvuln
-```
+**Features:**
+- Only saves results for vulnerable domains (ignores non-vulnerable)
+- Organizes by first letter of domain into subdirectories
+- Creates `iis.log` with tab-separated domain/line-count entries
+- Thread-safe for concurrent scanning
 
-### Advanced features
+## 📦 Installation
 
-The following options allow further tweaks:
+### Quick Install (Recommended)
 
-```
-🌀 Shortscan v0.9.2 · an IIS short filename enumeration tool by bitquark
-Usage: main [--wordlist FILE] [--header HEADER] [--concurrency CONCURRENCY] [--timeout SECONDS] [--output format] [--verbosity VERBOSITY] [--fullurl] [--norecurse] [--stabilise] [--patience LEVEL] [--characters CHARACTERS] [--autocomplete mode] [--isvuln] URL [URL ...]
-
-Positional arguments:
-  URL                    url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)
-
-Options:
-  --wordlist FILE, -w FILE
-                         combined wordlist + rainbow table generated with shortutil
-  --header HEADER, -H HEADER
-                         header to send with each request (use multiple times for multiple headers)
-  --concurrency CONCURRENCY, -c CONCURRENCY
-                         number of requests to make at once [default: 20]
-  --timeout SECONDS, -t SECONDS
-                         per-request timeout in seconds [default: 10]
-  --output format, -o format
-                         output format (human = human readable; json = JSON) [default: human]
-  --verbosity VERBOSITY, -v VERBOSITY
-                         how much noise to make (0 = quiet; 1 = debug; 2 = trace) [default: 0]
-  --fullurl, -F          display the full URL for confirmed files rather than just the filename [default: false]
-  --norecurse, -n        don't detect and recurse into subdirectories (disabled when autocomplete is disabled) [default: false]
-  --stabilise, -s        attempt to get coherent autocomplete results from an unstable server (generates more requests) [default: false]
-  --patience LEVEL, -p LEVEL
-                         patience level when determining vulnerability (0 = patient; 1 = very patient) [default: 0]
-  --characters CHARACTERS, -C CHARACTERS
-                         filename characters to enumerate [default: JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320-_()&'!#$%@^{}~]
-  --autocomplete mode, -a mode
-                         autocomplete detection mode (auto = autoselect; method = HTTP method magic; status = HTTP status; distance = Levenshtein distance; none = disable) [default: auto]
-  --isvuln, -V           bail after determining whether the service is vulnerable [default: false]
-  --help, -h             display this help and exit
-  --version              display version and exit
+```bash
+go install github.com/DFC302/shortscan-enhanced/cmd/shortscan@latest
 ```
 
-## Utility
+This installs both `shortscan` and the `shortutil` helper tool to your `$GOPATH/bin`.
 
-The shortscan project includes a utility named `shortutil` which can be used to perform various short filename operations and to make custom rainbow tables for use with the tool.
+### Install Specific Version
 
-### Examples
-
-You can create a rainbow table from an existing wordlist like this:
-
+```bash
+go install github.com/DFC302/shortscan-enhanced/cmd/shortscan@v1.0.0
 ```
+
+### Build from Source
+
+```bash
+git clone https://github.com/DFC302/shortscan-enhanced.git
+cd shortscan-enhanced
+make all
+```
+
+This creates:
+- `shortscan-enhanced` - Main scanner binary
+- `shortutil` - Rainbow table generator
+- `scan-iis.sh` - Convenience wrapper script
+
+## 🚀 Usage
+
+### Basic Scanning
+
+```bash
+# Single domain
+shortscan-enhanced example.com
+
+# Multiple domains from file
+shortscan-enhanced @targets.txt
+
+# Pipe from stdin
+cat domains.txt | shortscan-enhanced
+
+# Quick vulnerability check
+echo "example.com" | shortscan-enhanced -V
+```
+
+### Enhanced Features
+
+```bash
+# Scan with 2-minute timeout per domain
+cat targets.txt | shortscan-enhanced --scan-timeout 2m -V
+
+# Save vulnerable results automatically
+cat targets.txt | shortscan-enhanced --save-dir ./results
+
+# Combine all features
+cat targets.txt | shortscan-enhanced \
+    --scan-timeout 5m \
+    --save-dir ./iis-results \
+    --fullurl -p 1 -c 10
+```
+
+### Using the Wrapper Script
+
+The `scan-iis.sh` wrapper makes it even easier:
+
+```bash
+# Simple scan with auto-save
+./scan-iis.sh -d ./results targets.txt
+
+# With custom wordlist (auto-generates rainbow table)
+./scan-iis.sh -w ~/wordlists/custom.txt -d ./results targets.txt
+
+# Pipe input with timeout
+cat domains.txt | ./scan-iis.sh -d ./results -t 5m
+```
+
+## 🛠️ Shortutil - Rainbow Table Generator
+
+Generate rainbow tables for improved filename detection:
+
+```bash
+# Build rainbow table from wordlist
 shortutil wordlist input.txt > output.rainbow
-```
 
-To generate a one-off checksum for a file:
+# Use with shortscan
+shortscan-enhanced -w output.rainbow example.com
 
-```
+# Generate one-off checksum
 shortutil checksum index.html
 ```
 
-### Usage
-
-Run `shortutil <command> --help` for a definiteive list of options for each command.
+## 🎯 Complete Options
 
 ```
-Shortutil v0.3 · a short filename utility by bitquark
-Usage: main <command> [<args>]
-
 Options:
-  --help, -h             display this help and exit
-
-Commands:
-  wordlist               add hashes to a wordlist for use with, for example, shortscan
-  checksum               generate a one-off checksum for the given filename
+  --wordlist FILE, -w FILE       Combined wordlist + rainbow table
+  --header HEADER, -H HEADER     Custom header (use multiple times)
+  --concurrency NUM, -c NUM      Concurrent requests [default: 20]
+  --timeout SECONDS, -t SECONDS  Per-request timeout [default: 10]
+  --output FORMAT, -o FORMAT     Output format (human/json) [default: human]
+  --verbosity LEVEL, -v LEVEL    Noise level (0-2) [default: 0]
+  --fullurl, -F                  Display full URLs
+  --norecurse, -n                Don't recurse into subdirectories
+  --stabilise, -s                Handle unstable servers (more requests)
+  --patience LEVEL, -p LEVEL     Patience level (0-1) [default: 0]
+  --characters CHARS, -C CHARS   Characters to enumerate
+  --autocomplete MODE, -a MODE   Autocomplete mode (auto/method/status/distance/none)
+  --isvuln, -V                   Only check vulnerability
+  --scan-timeout DURATION        Per-domain timeout [default: 10m] ✨ NEW
+  --save-dir DIR                 Auto-save vulnerable results ✨ NEW
 ```
 
-## Wordlist
+## 📊 Example Workflow
 
-A custom wordlist was built for shortscan. For full details see [pkg/shortscan/resources/README.md](pkg/shortscan/resources/README.md)
+```bash
+# 1. Generate rainbow table from your wordlist
+shortutil wordlist ~/wordlists/iis-common.txt > iis.rainbow
 
-## Credit
+# 2. Scan targets with all features
+cat targets.txt | shortscan-enhanced \
+    -w iis.rainbow \
+    --save-dir ./scan-results \
+    --scan-timeout 3m \
+    --fullurl \
+    -p 1 \
+    -c 10
 
-Original IIS short filename [research](https://soroush.secproject.com/downloadable/microsoft_iis_tilde_character_vulnerability_feature.pdf) by Soroush Dalili.
+# 3. Review results
+cat ./scan-results/iis.log
+ls -la ./scan-results/*/
+```
 
-Additional research and this project by [bitquark](https://github.com/bitquark).
+## 🔄 Differences from Original
+
+| Feature | Original | Enhanced |
+|---------|----------|----------|
+| Stdin input | ❌ | ✅ |
+| Per-domain timeout | ❌ | ✅ (default 10m) |
+| Auto-save vulnerable | ❌ | ✅ (optional) |
+| File organization | ❌ | ✅ (letter-based dirs) |
+| Vulnerability logging | ❌ | ✅ (iis.log) |
+| All original features | ✅ | ✅ (100% compatible) |
+
+## 🧪 Testing
+
+Comprehensive testing performed:
+- ✅ 27 test scenarios across all features
+- ✅ Backward compatibility verified
+- ✅ Thread-safety validated
+- ✅ Production-ready
+
+See [TESTING_REPORT.md](TESTING_REPORT.md) for details.
+
+## 📝 Credits
+
+**Original Tool:** [Shortscan by bitquark](https://github.com/bitquark/shortscan)
+
+**IIS Short Filename Research:** [Soroush Dalili](https://soroush.secproject.com/downloadable/microsoft_iis_tilde_character_vulnerability_feature.pdf)
+
+**Enhancements:** DFC302 (2025)
+- Stdin support
+- Per-domain timeout
+- Automatic file organization
+- Production hardening
+
+## 📄 License
+
+Same as original Shortscan project.
+
+## 🤝 Contributing
+
+This is an enhanced fork. For core functionality issues, please check the [original repository](https://github.com/bitquark/shortscan).
+
+For enhancement-specific issues, please open an issue on this repository.
