@@ -184,6 +184,9 @@ var checksumRegex *regexp.Regexp
 // Mutex for log file writes
 var logMutex sync.Mutex
 
+// Global output buffer for capturing scan output when save-dir is specified
+var globalOutputBuf *outputBuffer
+
 // Command-line arguments and help
 type arguments struct {
 	Urls         []string `arg:"positional" help:"url to scan (multiple URLs can be provided; a file containing URLs can be specified with an «at» prefix, for example: @urls.txt)" placeholder:"URL"`
@@ -889,7 +892,13 @@ func logVulnerable(saveDir, url string, lineCount int) error {
 // printHuman prints human readable output if enabled
 func printHuman(s ...any) {
 	if args.Output == "human" {
-		fmt.Println(s...)
+		output := fmt.Sprintln(s...)
+		fmt.Print(output)
+
+		// Also write to buffer if save-dir specified
+		if globalOutputBuf != nil {
+			globalOutputBuf.Write([]byte(output))
+		}
 	}
 }
 
@@ -897,7 +906,13 @@ func printHuman(s ...any) {
 func printJSON(o any) {
 	if args.Output == "json" {
 		j, _ := json.Marshal(o)
-		fmt.Println(string(j))
+		output := string(j) + "\n"
+		fmt.Print(output)
+
+		// Also write to buffer if save-dir specified
+		if globalOutputBuf != nil {
+			globalOutputBuf.Write([]byte(output))
+		}
 	}
 }
 
