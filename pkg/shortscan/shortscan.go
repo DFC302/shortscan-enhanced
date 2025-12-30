@@ -142,8 +142,8 @@ func (ob *outputBuffer) IsVulnerable() bool {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	content := ob.buffer.String()
-	// Check for human format "Vulnerable: Yes"
-	if strings.Contains(content, "Vulnerable: Yes") {
+	// Check for human format "Vulnerable: Yes!" or "Vulnerable: Yes"
+	if strings.Contains(content, "Vulnerable: Yes!") || strings.Contains(content, "Vulnerable: Yes") {
 		return true
 	}
 	// Check for JSON format "vulnerable":true
