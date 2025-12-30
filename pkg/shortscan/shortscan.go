@@ -1049,6 +1049,11 @@ func Run() {
 		p.Fail("output must be one of: human, json")
 	}
 
+	// Validate scan timeout
+	if _, err := time.ParseDuration(args.ScanTimeout); err != nil {
+		p.Fail(fmt.Sprintf("invalid scan timeout format: %s (use format like 10m, 600s, 1h)", args.ScanTimeout))
+	}
+
 	// Build the list of URLs to scan
 	var urls []string
 
