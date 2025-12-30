@@ -129,6 +129,9 @@ cat domains.txt | ./scan-iis.sh -d ./results -t 5m
 Generate rainbow tables for improved filename detection:
 
 ```bash
+# Install
+go install github.com/DFC302/shortscan-enhanced/cmd/shortutil@latest
+
 # Build rainbow table from wordlist
 shortutil wordlist input.txt > output.rainbow
 
