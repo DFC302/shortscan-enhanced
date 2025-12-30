@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"embed"
+	"context"
 	"regexp"
 	"strings"
 	"math/rand"
@@ -901,7 +902,7 @@ func printJSON(o any) {
 }
 
 // Scan starts enumeration of the given URL
-func Scan(urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk markers) {
+func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk markers) {
 
 	// Loop through each URL
 	for len(urls) > 0 {
@@ -1361,6 +1362,6 @@ func Run() {
 	}
 
 	// Let's go!
-	Scan(urls, hc, st, wc, mk)
+	Scan(context.Background(), urls, hc, st, wc, mk)
 
 }
