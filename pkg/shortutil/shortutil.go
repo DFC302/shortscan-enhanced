@@ -125,8 +125,17 @@ func ChecksumWords(fh io.Reader, paramRegex *regexp.Regexp) []wordlistRecord {
 	s := bufio.NewScanner(fh)
 	for s.Scan() {
 
+		// Get the raw line
+		line := s.Text()
+
+		// Skip rainbow table entries (tab-separated format with 4 tabs)
+		// Format: CHECKSUM\tFILENAME83\tEXTENSION83\tFILENAME\tEXTENSION
+		if strings.Count(line, "\t") == 4 {
+			continue
+		}
+
 		// Unescape any URL-encoded characters
-		w, _ := url.PathUnescape(s.Text())
+		w, _ := url.PathUnescape(line)
 		w, _ = url.PathUnescape(w)
 
 		// Remove any path elements, anything that looks like a parameter, trim whitespace and remove tabs

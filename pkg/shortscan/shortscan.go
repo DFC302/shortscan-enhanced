@@ -838,6 +838,9 @@ func sanitizeDomainName(url string) string {
 
 // saveResult saves scan output to a file organized by first letter
 func saveResult(saveDir, url, output string) error {
+	// Clean up saveDir path (remove trailing slashes)
+	saveDir = strings.TrimRight(saveDir, "/")
+
 	// Sanitize domain name
 	filename := sanitizeDomainName(url)
 
@@ -869,6 +872,9 @@ func saveResult(saveDir, url, output string) error {
 func logVulnerable(saveDir, url string, lineCount int) error {
 	logMutex.Lock()
 	defer logMutex.Unlock()
+
+	// Clean up saveDir path (remove trailing slashes)
+	saveDir = strings.TrimRight(saveDir, "/")
 
 	logPath := fmt.Sprintf("%s/iis.log", saveDir)
 
