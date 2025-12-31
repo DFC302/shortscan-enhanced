@@ -154,7 +154,7 @@ func (ob *outputBuffer) IsVulnerable() bool {
 }
 
 // Version, rainbow table magic, default character set
-const version = "0.9.2"
+const version = "1.0.3"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
