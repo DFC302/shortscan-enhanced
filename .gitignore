@@ -1,0 +1,30 @@
+# Binaries
+shortscan
+shortscan-enhanced
+shortutil
+
+# Test files
+test_*.go
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
