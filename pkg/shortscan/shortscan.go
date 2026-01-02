@@ -167,7 +167,7 @@ func (ob *outputBuffer) IsVulnerable() bool {
 }
 
 // Version, rainbow table magic, default character set
-const version = "1.0.5"
+const version = "1.0.6"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
@@ -216,7 +216,7 @@ type arguments struct {
 	Characters   string   `arg:"-C" help:"filename characters to enumerate" default:"JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320-_()&'!#$%@^{}~"`
 	Autocomplete string   `arg:"-a" help:"autocomplete detection mode (auto = autoselect; method = HTTP method magic; status = HTTP status; distance = Levenshtein distance; none = disable)" placeholder:"mode" default:"auto"`
 	IsVuln       bool     `arg:"-V" help:"bail after determining whether the service is vulnerable" default:"false"`
-	ScanTimeout  string   `arg:"--scan-timeout" help:"maximum time to spend scanning each domain (e.g., 10m, 600s, 1h)" placeholder:"DURATION" default:"10m"`
+	ScanTimeout  string   `arg:"--scan-timeout" help:"maximum time to spend scanning each domain (e.g., 10m, 600s, 1h); use 0 to disable timeout" placeholder:"DURATION" default:"10m"`
 	SaveDir      string   `arg:"--save-dir" help:"directory to save results for vulnerable domains (organizes into subdirectories by first letter)" placeholder:"DIR"`
 }
 
@@ -1006,8 +1006,15 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		// Parse scan timeout
 		scanTimeout, _ := time.ParseDuration(args.ScanTimeout)
 
-		// Create timeout context for this domain
-		domainCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+		// Create timeout context for this domain (or no timeout if scanTimeout is 0)
+		var domainCtx context.Context
+		var cancel context.CancelFunc
+		if scanTimeout > 0 {
+			domainCtx, cancel = context.WithTimeout(ctx, scanTimeout)
+		} else {
+			// No timeout - scan can run indefinitely
+			domainCtx, cancel = context.WithCancel(ctx)
+		}
 
 		// Initialize output buffer for this domain if save-dir specified
 		var localOutputBuf *outputBuffer

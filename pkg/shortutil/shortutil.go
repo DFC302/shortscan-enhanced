@@ -53,7 +53,7 @@ var paramRegex = regexp.MustCompile("[?;#&\r\n]")
 var shortReplacer = strings.NewReplacer(" ", "", ".", "", ":", "_", "+", "_", ",", "_", ";", "_", "=", "_", "[", "_", "]", "_")
 
 // Version
-const version = "1.0.5"
+const version = "1.0.6"
 
 // Checksum calculates the short filename checksum for the given filename
 // Based on: https://tomgalvin.uk/assets/8dot3-checksum.c
