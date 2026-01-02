@@ -167,7 +167,7 @@ func (ob *outputBuffer) IsVulnerable() bool {
 }
 
 // Version, rainbow table magic, default character set
-const version = "1.0.6"
+const version = "1.0.7"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
@@ -301,12 +301,14 @@ func fetch(hc *http.Client, st *httpStats, method string, url string) (*http.Res
 	if r, err := httputil.DumpRequestOut(req, true); err == nil {
 		st.bytesTx += len(r)
 	} else {
-		log.WithFields(log.Fields{"err": err}).Fatal("Error dumping request")
+		// Don't fatal - this can happen when context is cancelled during timeout
+		log.WithFields(log.Fields{"err": err}).Debug("Error dumping request (likely due to timeout)")
 	}
 	if r, err := httputil.DumpResponse(res, true); err == nil {
 		st.bytesRx += len(r)
 	} else {
-		log.WithFields(log.Fields{"err": err}).Fatal("Error dumping response")
+		// Don't fatal - this can happen when context is cancelled during timeout
+		log.WithFields(log.Fields{"err": err}).Debug("Error dumping response (likely due to timeout)")
 	}
 	st.Unlock()
 
