@@ -167,7 +167,7 @@ func (ob *outputBuffer) IsVulnerable() bool {
 }
 
 // Version, rainbow table magic, default character set
-const version = "1.0.4"
+const version = "1.0.5"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
@@ -827,6 +827,18 @@ func randPath(l int, d int, chars string) string {
 	return pathEscape(string(b))
 }
 
+// getRootDomain extracts the protocol and hostname from a URL, removing any path components
+func getRootDomain(url string) string {
+	// Parse the URL
+	u, err := nurl.Parse(url)
+	if err != nil {
+		return url
+	}
+
+	// Return protocol + hostname (e.g., https://example.com/)
+	return fmt.Sprintf("%s://%s/", u.Scheme, u.Host)
+}
+
 // sanitizeDomainName converts a URL to a safe filename
 func sanitizeDomainName(url string) string {
 	// Convert to lowercase
@@ -850,12 +862,14 @@ func sanitizeDomainName(url string) string {
 }
 
 // saveResult saves scan output to a file organized by first letter
-func saveResult(saveDir, url, output string) error {
+// rootUrl is the base domain (e.g., https://example.com/) - all subdirectories append to this file
+// url is the current URL being scanned (may include subdirectories)
+func saveResult(saveDir, rootUrl, url, output string) error {
 	// Clean up saveDir path (remove trailing slashes)
 	saveDir = strings.TrimRight(saveDir, "/")
 
-	// Sanitize domain name
-	filename := sanitizeDomainName(url)
+	// Sanitize domain name using the ROOT url (so subdirectories go to same file)
+	filename := sanitizeDomainName(rootUrl)
 
 	// Get first character for directory organization
 	firstChar := "other"
@@ -872,9 +886,27 @@ func saveResult(saveDir, url, output string) error {
 	// Create file path
 	filepath := fmt.Sprintf("%s/%s.ss", subdir, filename)
 
+	// Check if file exists - if so, append; otherwise create new
+	var f *os.File
+	var err error
+	if _, statErr := os.Stat(filepath); statErr == nil {
+		// File exists, open in append mode
+		f, err = os.OpenFile(filepath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open file for append %s: %w", filepath, err)
+		}
+	} else {
+		// File doesn't exist, create it
+		f, err = os.Create(filepath)
+		if err != nil {
+			return fmt.Errorf("failed to create file %s: %w", filepath, err)
+		}
+	}
+	defer f.Close()
+
 	// Write output to file
-	if err := os.WriteFile(filepath, []byte(output), 0644); err != nil {
-		return fmt.Errorf("failed to write file %s: %w", filepath, err)
+	if _, err := f.WriteString(output); err != nil {
+		return fmt.Errorf("failed to write to file %s: %w", filepath, err)
 	}
 
 	log.WithFields(log.Fields{"file": filepath}).Debug("Saved vulnerable domain result")
@@ -947,6 +979,21 @@ func printJSONWithBuffer(buf *outputBuffer, o any) {
 
 // Scan starts enumeration of the given URL
 func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc wordlistConfig, mk markers) {
+
+	// Map each URL to its root domain (for combining subdirectory results into one file)
+	urlToRoot := make(map[string]string)
+	// Track cumulative line counts per root domain
+	rootLineCounts := make(map[string]int)
+
+	// Initialize root domains for initially provided URLs
+	for _, u := range urls {
+		normalized := strings.TrimSuffix(u, "/") + "/"
+		if !strings.Contains(normalized, "://") {
+			normalized = "https://" + normalized
+		}
+		root := getRootDomain(normalized)
+		urlToRoot[normalized] = root
+	}
 
 	// Loop through each URL
 	for len(urls) > 0 {
@@ -1231,21 +1278,38 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 
 		// Prepend discovered directories to urls list if scan completed
 		if !timedOut && len(newUrls) > 0 {
+			// Get root domain for current URL to map subdirectories
+			currentRoot := urlToRoot[url]
+			if currentRoot == "" {
+				currentRoot = getRootDomain(url)
+			}
+
+			// Map all discovered subdirectories to the same root domain
+			for _, newUrl := range newUrls {
+				urlToRoot[newUrl] = currentRoot
+			}
+
 			urls = append(newUrls, urls...)
 		}
 
 		// Save results if vulnerable and save-dir specified
 		if args.SaveDir != "" && globalOutputBuf != nil && globalOutputBuf.IsVulnerable() {
 			output := globalOutputBuf.String()
-			if err := saveResult(args.SaveDir, url, output); err != nil {
+
+			// Get root domain for this URL
+			rootUrl := urlToRoot[url]
+			if rootUrl == "" {
+				rootUrl = getRootDomain(url)
+			}
+
+			// Save to file using root domain (subdirectories append to same file)
+			if err := saveResult(args.SaveDir, rootUrl, url, output); err != nil {
 				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to save result")
 			}
 
-			// Count lines and log
+			// Accumulate line count for this root domain
 			lineCount := len(strings.Split(strings.TrimSpace(output), "\n"))
-			if err := logVulnerable(args.SaveDir, url, lineCount); err != nil {
-				log.WithFields(log.Fields{"err": err, "url": url}).Error("Failed to log vulnerable domain")
-			}
+			rootLineCounts[rootUrl] += lineCount
 		}
 
 		// Clear buffer for next domain
@@ -1256,6 +1320,15 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 
 	}
 	printHuman()
+
+	// Write accumulated line counts to iis.log for each root domain
+	if args.SaveDir != "" {
+		for rootUrl, totalLines := range rootLineCounts {
+			if err := logVulnerable(args.SaveDir, rootUrl, totalLines); err != nil {
+				log.WithFields(log.Fields{"err": err, "url": rootUrl}).Error("Failed to log vulnerable domain")
+			}
+		}
+	}
 
 	// Fin
 	printHuman(fmt.Sprintf("%s Requests: %d; Retries: %d; Sent %d bytes; Received %d bytes", color.New(color.FgWhite, color.Bold).Sprint("Finished!"), st.requests, st.retries, st.bytesTx, st.bytesRx))
