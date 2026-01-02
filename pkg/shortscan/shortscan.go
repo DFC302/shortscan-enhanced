@@ -137,24 +137,37 @@ func (ob *outputBuffer) Reset() {
 	ob.buffer.Reset()
 }
 
+// stripAnsiCodes removes ANSI escape sequences from a string
+func stripAnsiCodes(s string) string {
+	// ANSI escape codes follow the pattern: ESC[...m where ESC is \x1b
+	// This regex matches: \x1b followed by [ and any characters until m
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
 // IsVulnerable checks if output contains vulnerability confirmation
 func (ob *outputBuffer) IsVulnerable() bool {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	content := ob.buffer.String()
+
+	// Strip ANSI color codes before checking
+	// (color codes are present when output goes to terminal, absent when piped)
+	cleanContent := stripAnsiCodes(content)
+
 	// Check for human format "Vulnerable: Yes!" or "Vulnerable: Yes"
-	if strings.Contains(content, "Vulnerable: Yes!") || strings.Contains(content, "Vulnerable: Yes") {
+	if strings.Contains(cleanContent, "Vulnerable: Yes!") || strings.Contains(cleanContent, "Vulnerable: Yes") {
 		return true
 	}
 	// Check for JSON format "vulnerable":true
-	if strings.Contains(content, `"vulnerable":true`) {
+	if strings.Contains(cleanContent, `"vulnerable":true`) {
 		return true
 	}
 	return false
 }
 
 // Version, rainbow table magic, default character set
-const version = "1.0.3"
+const version = "1.0.4"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
