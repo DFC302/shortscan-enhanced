@@ -1300,6 +1300,9 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			rootUrl := urlToRoot[url]
 			if rootUrl == "" {
 				rootUrl = getRootDomain(url)
+				log.WithFields(log.Fields{"url": url, "rootUrl": rootUrl}).Debug("Root URL not in map, computed from URL")
+			} else {
+				log.WithFields(log.Fields{"url": url, "rootUrl": rootUrl}).Debug("Found root URL in map")
 			}
 
 			// Save to file using root domain (subdirectories append to same file)
@@ -1310,6 +1313,19 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 			// Accumulate line count for this root domain
 			lineCount := len(strings.Split(strings.TrimSpace(output), "\n"))
 			rootLineCounts[rootUrl] += lineCount
+		} else {
+			// Debug why save was skipped
+			if args.SaveDir == "" {
+				log.Debug("Save skipped: SaveDir not specified")
+			} else if globalOutputBuf == nil {
+				log.WithFields(log.Fields{"url": url}).Debug("Save skipped: output buffer is nil")
+			} else if !globalOutputBuf.IsVulnerable() {
+				bufContent := globalOutputBuf.String()
+				if len(bufContent) > 200 {
+					bufContent = bufContent[:200]
+				}
+				log.WithFields(log.Fields{"url": url, "bufferContent": bufContent}).Debug("Save skipped: not detected as vulnerable")
+			}
 		}
 
 		// Clear buffer for next domain
