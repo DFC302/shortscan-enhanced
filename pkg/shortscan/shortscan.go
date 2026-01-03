@@ -167,7 +167,7 @@ func (ob *outputBuffer) IsVulnerable() bool {
 }
 
 // Version, rainbow table magic, default character set
-const version = "1.0.7"
+const version = "1.0.8"
 const rainbowMagic = "#SHORTSCAN#"
 const alphanum = "JFKGOTMYVHSPCANDXLRWEBQUIZ8549176320"
 
@@ -1279,8 +1279,15 @@ func Scan(ctx context.Context, urls []string, hc *http.Client, st *httpStats, wc
 		case <-domainCtx.Done():
 			// Timeout occurred
 			timedOut = true
-			log.WithFields(log.Fields{"url": url, "timeout": args.ScanTimeout}).Warn("Domain scan timed out")
-			printHuman(color.New(color.FgYellow).Sprint("⚠ Scan timed out after", args.ScanTimeout))
+			remainingDomains := len(urls)
+			log.WithFields(log.Fields{"url": url, "timeout": args.ScanTimeout, "remaining": remainingDomains}).Warn("Domain scan timed out, moving to next domain")
+
+			// Print human-readable timeout message
+			if remainingDomains > 0 {
+				printHuman(color.New(color.FgYellow).Sprintf("⚠ Scan timed out after %s - skipping to next domain (%d remaining)", args.ScanTimeout, remainingDomains))
+			} else {
+				printHuman(color.New(color.FgYellow).Sprintf("⚠ Scan timed out after %s", args.ScanTimeout))
+			}
 		}
 
 		cancel()
